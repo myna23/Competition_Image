@@ -179,6 +179,132 @@ _CATEGORY_MAP = {
     "packet": ("Food & Beverage", "Packaged Foods"),
 }
 
+def _barcode_lookup(barcode: str, result: dict) -> dict:
+    """Enrich OCR result using Open Food Facts barcode database (free, no API key)."""
+    if barcode in ("N/A", ""):
+        return result
+    try:
+        import requests
+        resp = requests.get(
+            f"https://world.openfoodfacts.org/api/v0/product/{barcode}.json",
+            timeout=8,
+            headers={"User-Agent": "IMDB-AutoFill-Competition/1.0"},
+        )
+        data = resp.json()
+        if data.get("status") != 1:
+            return result   # not in database, keep OCR result
+
+        p = data["product"]
+
+        def _set(field: str, raw: str, conf: int = 93) -> None:
+            val = (raw or "").strip()
+            if val and val.lower() not in ("n/a", "unknown", ""):
+                result[field] = {"value": val, "confidence": conf}
+
+        # Brand
+        brands = p.get("brands", "")
+        _set("brand", brands.split(",")[0].strip().title())
+
+        # Product name (prefer English)
+        pname = p.get("product_name_en") or p.get("product_name") or ""
+        _set("product_name", pname.strip().title())
+
+        # Manufacturer
+        mfr = p.get("manufacturing_places") or p.get("brands", "")
+        _set("manufacturer", mfr.split(",")[0].strip().title())
+
+        # Weight
+        _set("weight_and_unit", p.get("quantity", ""))
+
+        # Packaging
+        pkg_raw = (p.get("packaging") or "").split(",")[0].strip().title()
+        _set("packaging_type", pkg_raw)
+
+        # Country of origin
+        countries = p.get("countries_en") or p.get("countries") or ""
+        cty_raw = countries.split(",")[0].strip()
+        if cty_raw:
+            result["country_of_origin"] = {
+                "value": _norm_country(cty_raw), "confidence": 93}
+
+        # Category / segment from Open Food Facts categories
+        cats = (p.get("categories_en") or p.get("categories") or "").lower()
+        for kw, (cat, seg) in _CATEGORY_MAP.items():
+            if kw in cats:
+                result["category_type"] = {"value": cat, "confidence": 90}
+                result["segment_type"]  = {"value": seg, "confidence": 88}
+                break
+
+        return result
+    except Exception:
+        return result   # network error — keep existing result
+
+
+def _extract_gemini(img: Image.Image) -> tuple[dict | None, str | None]:
+    """Extract all 10 IMDB attributes using Google Gemini Vision (free tier)."""
+    try:
+        import google.generativeai as genai
+        import json as _json
+
+        api_key = ""
+        try:
+            api_key = st.secrets.get("GOOGLE_API_KEY", "")
+        except Exception:
+            pass
+        if not api_key:
+            api_key = os.getenv("GOOGLE_API_KEY", "")
+        if not api_key:
+            return None, "No GOOGLE_API_KEY configured"
+
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel("gemini-1.5-flash")
+
+        prompt = (
+            "You are a product data specialist. Analyze this product image and extract "
+            "exactly these 10 IMDB (Item Master Database) fields. "
+            "Return ONLY a JSON object — no markdown, no explanation.\n\n"
+            "Fields (use the string \"N/A\" if not visible):\n"
+            "- barcode: the numeric barcode (digits only)\n"
+            "- category_type: e.g. Food & Beverage, Personal Care, Household\n"
+            "- segment_type: e.g. Seasonings & Spices, Bar Soap, Juice Drinks, Chocolate Drinks\n"
+            "- manufacturer: company that made it\n"
+            "- brand: the main brand name on the package\n"
+            "- product_name: full product name including flavor/variant\n"
+            "- weight_and_unit: e.g. 100g, 500ml (number + unit)\n"
+            "- packaging_type: e.g. Sachet, Bottle, Can, Box, Pouch, Carton\n"
+            "- country_of_origin: country of manufacture (convert PRC to China)\n"
+            "- promotional_messages: any promotional tagline on the package\n\n"
+            "Return format: {\"barcode\": \"...\", \"category_type\": \"...\", ...}"
+        )
+
+        response = model.generate_content([prompt, img])
+        raw = response.text.strip()
+        # Strip markdown code fences if present
+        raw = re.sub(r"^```(?:json)?", "", raw).strip(" `\n")
+        raw = re.sub(r"```$", "", raw).strip(" `\n")
+
+        data = _json.loads(raw)
+
+        result: dict = {}
+        for field in IMDB_COLS:
+            val = str(data.get(field, "N/A")).strip() or "N/A"
+            conf = 92 if val != "N/A" else 45
+            result[field] = {"value": val, "confidence": conf}
+
+        # Barcode: upgrade confidence if it looks like a real barcode
+        bc = result["barcode"]["value"]
+        if re.match(r"^\d{8,14}$", bc):
+            result["barcode"]["confidence"] = 97
+        # Normalise country
+        result["country_of_origin"]["value"] = _norm_country(
+            result["country_of_origin"]["value"])
+
+        return result, None
+
+    except Exception as e:
+        return None, str(e)
+
+
 def _preprocess(img: Image.Image, enhance: bool = True) -> Image.Image:
     if max(img.size) > 1920:
         img.thumbnail((1920, 1920), Image.LANCZOS)
@@ -668,7 +794,15 @@ with tab_upload:
                     img = Image.open(io.BytesIO(raw_bytes))
                     img = _preprocess(img, enhance=enhance)
 
-                    result, err = _extract_ml(img)
+                    # Step 1: OCR extraction (Gemini if key set, else Tesseract)
+                    result, err = _extract_gemini(img)
+                    if result is None:
+                        result, err = _extract_ml(img)
+
+                    # Step 2: enrich with Open Food Facts barcode lookup (free, global)
+                    if result:
+                        barcode_val = result.get("barcode", {}).get("value", "N/A")
+                        result = _barcode_lookup(barcode_val, result)
 
                     if err:
                         st.error(f"**{file.name}**: {err}")
