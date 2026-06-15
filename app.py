@@ -534,12 +534,26 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
                       and not any(sw in l.lower() for sw in _junk_sw)]
 
         pn_m = re.search(
-            rf"([A-Z][A-Za-z']+\s+{_prod_kw}[^,\n]{{0,40}})",
+            rf"([A-Z][A-Za-z']+\s+{_prod_kw}[^,\n]{{0,60}})",
             logo_text + "\n" + ocr_text, re.I)
         if pn_m:
             product_name = re.sub(r"\s+", " ", pn_m.group(1)).strip().title()
         else:
             product_name = " ".join(desc_lines[:2]).title() if len(desc_lines) >= 2 else brand
+
+        # If product name looks garbled (contains ! or is very short), reconstruct from components
+        if "!" in product_name or len(product_name) < len(brand) + 5:
+            pn_parts = [brand]
+            for kw in ["Seasoning", "Powder", "Sauce", "Soap", "Lotion", "Cream",
+                       "Drink", "Juice", "Tea", "Coffee", "Chocolate"]:
+                if re.search(rf"\b{kw}\b", all_text, re.I) and kw.lower() not in " ".join(pn_parts).lower():
+                    pn_parts.append(kw)
+            for fw in ["Ginger", "Garlic", "Vanilla", "Chocolate", "Strawberry",
+                       "Orange", "Lemon", "Mint", "Spicy", "Original", "Flavor", "Flavour"]:
+                if re.search(rf"\b{fw}\b", all_text, re.I) and fw.lower() not in " ".join(pn_parts).lower():
+                    pn_parts.append(fw)
+            if len(pn_parts) > 1:
+                product_name = " ".join(pn_parts)
 
         # Promotional messages — skip lines that are mostly garbled (single chars/symbols)
         def _looks_valid(text: str) -> bool:
