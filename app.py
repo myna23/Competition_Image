@@ -272,48 +272,65 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
 
         # ── Brand detection ───────────────────────────────────────────────────
         brand = "N/A"
+        _non_brand = {
+            "MADE", "INGREDIENT", "INGREDIENTS", "DIRECTION", "DIRECTIONS",
+            "STORAGE", "STOCKAGE", "KEEP", "COOL", "STORE", "OPEN", "SALT",
+            "SERVING", "BATCH", "PROD", "EXPIRY", "DATE", "BEST", "BEFORE",
+            "IMPORTED", "MARKETED", "DISTRIBUTED", "PRODUCED", "PRODUCT",
+            "USING", "SPOON", "LIQUID", "SAUCE", "DISH", "AMOUNT", "ACTUAL",
+            "CONTENTS", "WARNING", "CAUTION", "NOTE", "EMAIL", "PHONE",
+            "WEIGHT", "NETT", "TOTAL", "EACH", "SIZE", "FOOD", "PACK",
+        }
 
-        # Strategy 1: "Marketed By / Imported By / Distributed By"
-        for mkt_pat in [r"marketed\s+by[:\s]+([A-Z][a-zA-Z]+)",
-                        r"imported\s+by[:\s]+([A-Z][a-zA-Z]+)",
-                        r"distributed\s+by[:\s]+([A-Z][a-zA-Z]+)",
-                        r"brand\s*:[:\s]+([A-Z][a-zA-Z]+)"]:
-            mkt_m = re.search(mkt_pat, all_text, re.I)
-            if mkt_m:
-                brand = mkt_m.group(1).strip().title()
-                break
+        # Strategy 1: word that appears DIRECTLY BEFORE a product-type keyword
+        _prod_kw = (r"(?:seasoning|powder|sauce|soap|lotion|shampoo|juice|biscuit|"
+                    r"cream|oil|chocolate|detergent|toothpaste|noodle|rice|sardine|"
+                    r"mackerel|drink|beverage|tea|coffee|water|milk|beer|wine)")
+        brand_pre = re.search(rf"([A-Z][A-Za-z']+)\s+{_prod_kw}", ocr_text, re.I)
+        if brand_pre:
+            candidate = brand_pre.group(1).strip()
+            if candidate.upper() not in _non_brand and len(candidate) >= 3:
+                brand = candidate.title()
 
-        # Strategy 2: most-frequent ALL-CAPS word ≥4 chars (brand logos repeat in text)
+        # Strategy 2: "Marketed By / Imported By / Distributed By"
         if brand == "N/A":
-            _caps_stop = {
-                "MADE", "INGREDIENT", "INGREDIENTS", "DIRECTION", "DIRECTIONS",
-                "STORAGE", "STOCKAGE", "KEEP", "COOL", "STORE", "OPEN",
-                "SERVING", "BATCH", "PROD", "EXPIRY", "DATE", "BEST", "BEFORE",
-                "IMPORTED", "MARKETED", "DISTRIBUTED", "PRODUCED", "PRODUCT",
-                "USING", "SPOON", "LIQUID", "SAUCE", "DISH", "AMOUNT", "ACTUAL",
-                "CONTENTS", "WARNING", "CAUTION", "NOTE", "EMAIL", "PHONE",
-                "WEIGHT", "NETT", "TOTAL", "EACH", "SIZE",
-            }
+            for mkt_pat in [r"marketed\s+by[:\s]+([A-Z][a-zA-Z]+)",
+                            r"imported\s+by[:\s]+([A-Z][a-zA-Z]+)",
+                            r"distributed\s+by[:\s]+([A-Z][a-zA-Z]+)",
+                            r"brand\s*:[:\s]+([A-Z][a-zA-Z]+)"]:
+                mkt_m = re.search(mkt_pat, all_text, re.I)
+                if mkt_m:
+                    brand = mkt_m.group(1).strip().title()
+                    break
+
+        # Strategy 3: most-frequent ALL-CAPS word ≥5 chars
+        if brand == "N/A":
             freq: dict[str, int] = {}
-            for w in re.findall(r"\b[A-Z]{4,}\b", ocr_text):
-                if w not in _caps_stop:
+            for w in re.findall(r"\b[A-Z]{5,}\b", ocr_text):
+                if w not in _non_brand:
                     freq[w] = freq.get(w, 0) + 1
             if freq:
                 brand = max(freq, key=freq.get).title()
 
-        # Strategy 3: fallback to first non-junk line
+        # Strategy 4: fallback to first non-junk line
         if brand == "N/A" and lines:
             brand = lines[0].title()
 
-        # ── Product name: brand + next clean descriptive lines ───────────────
-        _junk_sw = ["ingredient", "direction", "storage", "imported", "marketed",
-                    "batch", "expiry", "prod date", "tel:", "p.o", "email", "www",
-                    "produced by", "distributed", "using one", "using two"]
-        desc_lines = [l for l in lines
-                      if len(l) > 3
-                      and not re.match(r"^[\d\s\.\-/]+$", l)
-                      and not any(sw in l.lower() for sw in _junk_sw)]
-        product_name = " ".join(desc_lines[:2]).title() if len(desc_lines) >= 2 else brand
+        # ── Product name: find the span "Brand + product-type + flavor/variant" ─
+        pn_m = re.search(
+            rf"([A-Z][A-Za-z']+\s+{_prod_kw}[^,\n]{{0,40}})",
+            ocr_text, re.I)
+        if pn_m:
+            product_name = re.sub(r"\s+", " ", pn_m.group(1)).strip().title()
+        else:
+            _junk_sw = ["ingredient", "direction", "storage", "imported", "marketed",
+                        "batch", "expiry", "prod date", "tel:", "p.o", "email", "www",
+                        "produced by", "distributed", "using one", "using two"]
+            desc_lines = [l for l in lines
+                          if len(l) > 3
+                          and not re.match(r"^[\d\s\.\-/]+$", l)
+                          and not any(sw in l.lower() for sw in _junk_sw)]
+            product_name = " ".join(desc_lines[:2]).title() if len(desc_lines) >= 2 else brand
 
         # Promotional messages
         promo_lines = [l for l in desc_lines[2:] if len(l) > 8
