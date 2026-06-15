@@ -428,13 +428,12 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             all_text, re.I)
         manufacturer = re.sub(r"\s+", " ", mfr_m.group(1)).strip().title() if mfr_m else "N/A"
 
-        # Country — phrase match, then bare token scan
+        # Country — take only the FIRST word after phrase to avoid "PRC Ginger" etc.
         cty_m = re.search(
-            r"(?:made in|product of|country of origin|produced in)[:\s,]*([A-Za-z][A-Za-z\s\.]{1,25})",
+            r"(?:made in|product of|country of origin|produced in)[:\s,]*([A-Za-z][A-Za-z\.]+)",
             all_text, re.I)
         if cty_m:
-            raw_cty = re.split(r"[\n,\.]", cty_m.group(1))[0].strip()
-            country = _norm_country(raw_cty)
+            country = _norm_country(cty_m.group(1).strip())
         elif re.search(r"\bPR[CG]\b|\bP\.R\.C\.?\b", all_text, re.I):
             country = "China"
         else:
@@ -445,13 +444,17 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             else:
                 country = "N/A"
 
-        # Packaging — use word boundary to avoid "can" matching "scan" etc.
+        # Packaging — exclude "P.O Box" (postal address) from matching "box"
+        _no_po_box = not re.search(r"p\.?o\.?\s*box", all_text, re.I)
         pkg_map = [("sachet", "Sachet"), ("pouch", "Pouch"), ("carton", "Carton"),
                    ("bottle", "Bottle"), ("tin", "Tin"), ("jar", "Jar"),
-                   ("tube", "Tube"), ("box", "Cardboard Box"), ("bag", "Plastic Bag"),
+                   ("tube", "Tube"), ("bag", "Plastic Bag"),
                    ("can", "Can"), ("powder", "Sachet")]
         packaging = next(
             (v for k, v in pkg_map if re.search(rf"\b{k}\b", all_text, re.I)), "N/A")
+        # Only fall back to "box" if no postal box address found
+        if packaging == "N/A" and _no_po_box and re.search(r"\bbox\b", all_text, re.I):
+            packaging = "Cardboard Box"
 
         # ── Brand detection ───────────────────────────────────────────────────
         brand = "N/A"
