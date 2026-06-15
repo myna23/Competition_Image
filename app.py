@@ -12,7 +12,6 @@ load_dotenv()
 
 import streamlit as st
 import io, os, re
-import numpy as np
 from PIL import Image, ImageEnhance
 import pandas as pd
 from datetime import datetime
@@ -178,20 +177,6 @@ _CATEGORY_MAP = {
     "packet": ("Food & Beverage", "Packaged Foods"),
 }
 
-@st.cache_resource(show_spinner="Loading EasyOCR model…")
-def _load_ocr():
-    import easyocr
-    return easyocr.Reader(["en"], gpu=False, verbose=False)
-
-@st.cache_resource(show_spinner="Loading EfficientNet CNN…")
-def _load_cnn():
-    import torch
-    from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
-    weights = EfficientNet_B0_Weights.IMAGENET1K_V1
-    model = efficientnet_b0(weights=weights)
-    model.eval()
-    return model, weights
-
 def _preprocess(img: Image.Image, enhance: bool = True) -> Image.Image:
     if max(img.size) > 1920:
         img.thumbnail((1920, 1920), Image.LANCZOS)
@@ -204,21 +189,16 @@ def _preprocess(img: Image.Image, enhance: bool = True) -> Image.Image:
 
 def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
     try:
-        import torch
-        import torchvision.transforms as T
+        import pytesseract
 
-        img_np = np.array(img)
+        # ── Tesseract OCR text extraction ─────────────────────────────────────
+        ocr_text = pytesseract.image_to_string(img, config="--psm 3")
+        all_text  = " ".join(ocr_text.split())
+        lines     = [l.strip() for l in ocr_text.splitlines() if len(l.strip()) > 2]
+        ocr_conf  = 80  # pytesseract base confidence
 
-        # ── EasyOCR text extraction ───────────────────────────────────────────
-        ocr = _load_ocr()
-        raw_texts = ocr.readtext(img_np, detail=1, paragraph=False)
-        texts = [(r[1].strip(), round(r[2] * 100, 1)) for r in raw_texts if r[2] > 0.3]
-        all_text = " ".join(t for t, _ in texts)
-        lines = [t for t, _ in texts]
-        avg_ocr_conf = round(sum(c for _, c in texts) / len(texts), 1) if texts else 50
-
-        def _ocr_conf(found: bool) -> int:
-            return min(int(avg_ocr_conf), 95) if found else 45
+        def _conf(found: bool) -> int:
+            return ocr_conf if found else 45
 
         # Barcode
         bc_m = re.search(r"\b(\d{8,14})\b", all_text)
@@ -229,8 +209,9 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
         weight = (wt_m.group(1) + wt_m.group(2).lower()) if wt_m else "N/A"
 
         # Manufacturer
-        mfr_m = re.search(r"(?:manufactured by|mfd by|mfr)[:\s]+([A-Za-z][\w\s]+(limited|ltd|co\.|company|inc)?)",
-                           all_text, re.I)
+        mfr_m = re.search(
+            r"(?:manufactured by|mfd by|mfr)[:\s]+([A-Za-z][\w\s]+(limited|ltd|co\.|company|inc)?)",
+            all_text, re.I)
         manufacturer = mfr_m.group(1).strip().title() if mfr_m else "N/A"
 
         # Country
@@ -243,47 +224,34 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
                    "jar": "Jar", "tube": "Tube", "bag": "Plastic Bag"}
         packaging = next((v for k, v in pkg_map.items() if k in all_text.lower()), "N/A")
 
-        brand       = lines[0].title() if lines else "N/A"
+        # Brand & product name from first meaningful lines
+        brand        = lines[0].title() if lines else "N/A"
         product_name = " ".join(lines[:2]).title() if len(lines) >= 2 else brand
-        promo_lines  = [t for t, _ in texts if len(t) > 8 and t not in (brand, product_name)
-                        and not re.match(r"^[\d\s]+$", t)]
+
+        # Promotional messages
+        promo_lines = [l for l in lines if len(l) > 8
+                       and l not in (brand, product_name)
+                       and not re.match(r"^[\d\s]+$", l)]
         promo = promo_lines[0] if promo_lines else "N/A"
 
-        # ── EfficientNet-B0 category classification ───────────────────────────
-        cnn_model, weights = _load_cnn()
-        preprocess = T.Compose([
-            T.Resize(256), T.CenterCrop(224), T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-        ])
-        tensor = preprocess(img).unsqueeze(0)
-        categories = weights.meta["categories"]
-        with torch.no_grad():
-            probs = torch.softmax(cnn_model(tensor), dim=1)[0]
-        top_probs, top_idxs = probs.topk(5)
-        top_preds = [(categories[i], round(p.item() * 100, 2))
-                     for i, p in zip(top_idxs, top_probs)]
-
-        cat_type, seg_type, cnn_conf = "Food & Beverage", "General", 40
-        for cls_name, prob in top_preds:
-            for kw, (cat, seg) in _CATEGORY_MAP.items():
-                if kw in cls_name.lower():
-                    cat_type, seg_type, cnn_conf = cat, seg, int(prob)
-                    break
-            if cnn_conf > 40:
+        # ── NLP keyword category classification from OCR text ─────────────────
+        cat_type, seg_type, cat_conf = "Food & Beverage", "Packaged Foods", 60
+        for kw, (cat, seg) in _CATEGORY_MAP.items():
+            if kw in all_text.lower():
+                cat_type, seg_type, cat_conf = cat, seg, 85
                 break
 
-        # ── Build result in standard format ──────────────────────────────────
         result = {
-            "barcode":              {"value": barcode,      "confidence": _ocr_conf(barcode != "N/A")},
-            "category_type":        {"value": cat_type,     "confidence": max(cnn_conf, 55)},
-            "segment_type":         {"value": seg_type,     "confidence": max(cnn_conf - 5, 50)},
-            "manufacturer":         {"value": manufacturer, "confidence": _ocr_conf(manufacturer != "N/A")},
-            "brand":                {"value": brand,        "confidence": _ocr_conf(bool(brand))},
-            "product_name":         {"value": product_name, "confidence": _ocr_conf(bool(product_name))},
-            "weight_and_unit":      {"value": weight,       "confidence": _ocr_conf(weight != "N/A")},
-            "packaging_type":       {"value": packaging,    "confidence": _ocr_conf(packaging != "N/A")},
-            "country_of_origin":    {"value": country,      "confidence": _ocr_conf(country != "N/A")},
-            "promotional_messages": {"value": promo,        "confidence": _ocr_conf(promo != "N/A")},
+            "barcode":              {"value": barcode,       "confidence": _conf(barcode != "N/A")},
+            "category_type":        {"value": cat_type,      "confidence": cat_conf},
+            "segment_type":         {"value": seg_type,      "confidence": max(cat_conf - 5, 55)},
+            "manufacturer":         {"value": manufacturer,  "confidence": _conf(manufacturer != "N/A")},
+            "brand":                {"value": brand,         "confidence": _conf(bool(brand))},
+            "product_name":         {"value": product_name,  "confidence": _conf(bool(product_name))},
+            "weight_and_unit":      {"value": weight,        "confidence": _conf(weight != "N/A")},
+            "packaging_type":       {"value": packaging,     "confidence": _conf(packaging != "N/A")},
+            "country_of_origin":    {"value": country,       "confidence": _conf(country != "N/A")},
+            "promotional_messages": {"value": promo,         "confidence": _conf(promo != "N/A")},
         }
         return result, None
 
