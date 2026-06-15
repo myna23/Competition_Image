@@ -246,15 +246,17 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             all_text, re.I)
         manufacturer = mfr_m.group(1).strip().title() if mfr_m else "N/A"
 
-        # Country — extended patterns including standalone country names
+        # Country — phrase match, then bare token scan
         cty_m = re.search(
-            r"(?:made in|product of|country of origin|produced in)[:\s]+([A-Za-z][A-Za-z\s\.]+)",
+            r"(?:made in|product of|country of origin|produced in)[:\s,]*([A-Za-z][A-Za-z\s\.]{1,25})",
             all_text, re.I)
         if cty_m:
-            country = _norm_country(cty_m.group(1).split()[0])  # take first word to avoid runon
+            raw_cty = re.split(r"[\n,\.]", cty_m.group(1))[0].strip()
+            country = _norm_country(raw_cty)
+        elif re.search(r"\bPRC\b|\bP\.R\.C\.?\b", ocr_text, re.I):
+            country = "China"
         else:
-            # Fallback: look for known country abbreviations directly in text
-            for abbr in ("prc", "usa", "uk", "ghana", "china", "nigeria"):
+            for abbr in ("usa", "uk", "ghana", "nigeria", "china", "kenya", "india"):
                 if abbr in all_text.lower():
                     country = _norm_country(abbr)
                     break
@@ -268,22 +270,45 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
                    "powder": "Sachet", "tin": "Tin"}
         packaging = next((v for k, v in pkg_map.items() if k in all_text.lower()), "N/A")
 
-        # ── Brand: prioritise ALL-CAPS words (brand names are usually uppercase) ──
-        _stop = {"the", "and", "for", "with", "from", "of", "in", "by", "a", "is",
-                 "made", "ingredients", "directions", "storage", "net", "weight",
-                 "serving", "batch", "prod", "exp", "date", "imported", "marketed"}
-        caps_words = [w for w in re.findall(r"\b[A-Z]{2,}\b", ocr_text)
-                      if w.lower() not in _stop and len(w) >= 3]
-        brand = caps_words[0].title() if caps_words else (lines[0].title() if lines else "N/A")
+        # ── Brand detection ───────────────────────────────────────────────────
+        brand = "N/A"
 
-        # Product name: brand + next descriptive line
+        # Strategy 1: look for "Marketed By / Imported By / Distributed By / Brand:"
+        mkt_m = re.search(
+            r"(?:imported\s*(?:&|and)\s*marketed by|marketed by|distributed by|brand\s*:)[:\s]+([A-Z][a-zA-Z]+)",
+            all_text, re.I)
+        if mkt_m:
+            brand = mkt_m.group(1).strip().title()
+
+        # Strategy 2: ALL-CAPS logo words — with a thorough stop list
+        if brand == "N/A":
+            _caps_stop = {
+                "THE", "AND", "FOR", "WITH", "FROM", "OF", "IN", "BY", "A", "IS",
+                "MADE", "INGREDIENT", "INGREDIENTS", "DIRECTION", "DIRECTIONS",
+                "STORAGE", "NET", "WEIGHT", "SERVING", "BATCH", "PROD", "EXP",
+                "DATE", "IMPORTED", "MARKETED", "DISTRIBUTED", "PRODUCED",
+                "PRODUCT", "CONTENTS", "WARNING", "CAUTION", "NOTE", "KEEP",
+                "BEST", "USE", "BEFORE", "AFTER", "OPEN", "STORE", "COOL", "DRY",
+                "USING", "ONE", "TWO", "ADD", "MIX", "BAUD", "TEL", "EMAIL",
+                "PRC", "USA", "UK", "LTD", "CO", "INC", "LLC",
+            }
+            caps_words = [w for w in re.findall(r"\b[A-Z]{3,}\b", ocr_text)
+                          if w not in _caps_stop]
+            if caps_words:
+                brand = caps_words[0].title()
+
+        # Strategy 3: fallback to first non-junk line
+        if brand == "N/A" and lines:
+            brand = lines[0].title()
+
+        # ── Product name: brand + next clean descriptive lines ───────────────
+        _junk_sw = ["ingredient", "direction", "storage", "imported", "marketed",
+                    "batch", "expiry", "prod date", "tel:", "p.o", "email", "www",
+                    "produced by", "distributed", "using one", "using two"]
         desc_lines = [l for l in lines
                       if len(l) > 3
                       and not re.match(r"^[\d\s\.\-/]+$", l)
-                      and l.lower() not in _stop
-                      and not any(sw in l.lower() for sw in
-                                  ["ingredient", "direction", "storage", "imported", "batch",
-                                   "expiry", "prod date", "tel:", "p.o", "email", "www"])]
+                      and not any(sw in l.lower() for sw in _junk_sw)]
         product_name = " ".join(desc_lines[:2]).title() if len(desc_lines) >= 2 else brand
 
         # Promotional messages
