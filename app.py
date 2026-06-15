@@ -315,6 +315,42 @@ def _preprocess(img: Image.Image, enhance: bool = True) -> Image.Image:
         img = ImageEnhance.Sharpness(img).enhance(1.5)
     return img
 
+def _ocr_space_text(img: Image.Image) -> str:
+    """Use OCR.space free cloud API (demo key works globally, no sign-up needed)."""
+    try:
+        import requests, base64, io as _io
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+
+        api_key = "helloworld"   # free demo key — or add OCR_SPACE_KEY to Streamlit secrets
+        try:
+            api_key = st.secrets.get("OCR_SPACE_KEY", "helloworld")
+        except Exception:
+            pass
+
+        resp = requests.post(
+            "https://api.ocr.space/parse/image",
+            data={
+                "apikey": api_key,
+                "base64Image": f"data:image/jpeg;base64,{b64}",
+                "language": "eng",
+                "OCREngine": 2,          # Engine 2 handles product labels better
+                "detectOrientation": True,
+                "isTable": False,
+            },
+            timeout=20,
+        )
+        data = resp.json()
+        if data.get("IsErroredOnProcessing"):
+            return ""
+        return " ".join(
+            r.get("ParsedText", "") for r in data.get("ParsedResults", [])
+        )
+    except Exception:
+        return ""
+
+
 def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
     try:
         import pytesseract
@@ -347,22 +383,25 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             thresh = cv2.resize(thresh, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
         ocr_img = Image.fromarray(thresh)
 
-        # ── Tesseract OCR — main pass ─────────────────────────────────────────
-        ocr_text = pytesseract.image_to_string(ocr_img, config="--psm 3 --oem 3")
-
-        # ── Logo OCR — top half of original image, sparse mode (PSM 11) ────────
+        # ── OCR: try OCR.space cloud first, fall back to Tesseract ──────────────
         logo_text = ""
-        try:
-            h_img, w_img = img_np.shape[:2]
-            logo_np = img_np[: h_img // 2, :]          # top half captures more text
-            logo_gray_tmp = cv2.cvtColor(logo_np, cv2.COLOR_RGB2GRAY)
-            if logo_gray_tmp.mean() < 100:              # dark bg (e.g. green logo) → invert
-                logo_np = cv2.bitwise_not(logo_np)
-            # PSM 11 = sparse text — finds text anywhere regardless of layout
-            logo_text = pytesseract.image_to_string(
-                Image.fromarray(logo_np), config="--psm 11 --oem 3")
-        except Exception:
-            pass
+        cloud_text = _ocr_space_text(img)   # original image → best quality
+        if cloud_text.strip():
+            ocr_text = cloud_text
+        else:
+            # Tesseract on preprocessed image (fallback)
+            ocr_text = pytesseract.image_to_string(ocr_img, config="--psm 3 --oem 3")
+            # Logo region with sparse mode
+            try:
+                h_img, w_img = img_np.shape[:2]
+                logo_np = img_np[: h_img // 2, :]
+                logo_gray_tmp = cv2.cvtColor(logo_np, cv2.COLOR_RGB2GRAY)
+                if logo_gray_tmp.mean() < 100:
+                    logo_np = cv2.bitwise_not(logo_np)
+                logo_text = pytesseract.image_to_string(
+                    Image.fromarray(logo_np), config="--psm 11 --oem 3")
+            except Exception:
+                pass
 
         all_text = " ".join((logo_text + " " + ocr_text).split())
         lines    = [l.strip() for l in ocr_text.splitlines() if len(l.strip()) > 2]
