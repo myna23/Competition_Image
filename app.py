@@ -224,16 +224,17 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
         # ── Tesseract OCR — main pass ─────────────────────────────────────────
         ocr_text = pytesseract.image_to_string(ocr_img, config="--psm 3 --oem 3")
 
-        # ── Logo OCR — top third of original image for brand/product name ────
+        # ── Logo OCR — top half of original image, sparse mode (PSM 11) ────────
         logo_text = ""
         try:
             h_img, w_img = img_np.shape[:2]
-            logo_np = img_np[: h_img // 3, :]
+            logo_np = img_np[: h_img // 2, :]          # top half captures more text
             logo_gray_tmp = cv2.cvtColor(logo_np, cv2.COLOR_RGB2GRAY)
-            if logo_gray_tmp.mean() < 100:
+            if logo_gray_tmp.mean() < 100:              # dark bg (e.g. green logo) → invert
                 logo_np = cv2.bitwise_not(logo_np)
+            # PSM 11 = sparse text — finds text anywhere regardless of layout
             logo_text = pytesseract.image_to_string(
-                Image.fromarray(logo_np), config="--psm 6 --oem 3")
+                Image.fromarray(logo_np), config="--psm 11 --oem 3")
         except Exception:
             pass
 
@@ -356,19 +357,20 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             brand = lines[0].title()
 
         # ── Product name: logo region first, then main OCR ───────────────────
+        _junk_sw = ["ingredient", "direction", "storage", "imported", "marketed",
+                    "batch", "expiry", "prod date", "tel:", "p.o", "email", "www",
+                    "produced by", "distributed", "using one", "using two"]
+        desc_lines = [l for l in lines
+                      if len(l) > 3
+                      and not re.match(r"^[\d\s\.\-/]+$", l)
+                      and not any(sw in l.lower() for sw in _junk_sw)]
+
         pn_m = re.search(
             rf"([A-Z][A-Za-z']+\s+{_prod_kw}[^,\n]{{0,40}})",
             logo_text + "\n" + ocr_text, re.I)
         if pn_m:
             product_name = re.sub(r"\s+", " ", pn_m.group(1)).strip().title()
         else:
-            _junk_sw = ["ingredient", "direction", "storage", "imported", "marketed",
-                        "batch", "expiry", "prod date", "tel:", "p.o", "email", "www",
-                        "produced by", "distributed", "using one", "using two"]
-            desc_lines = [l for l in lines
-                          if len(l) > 3
-                          and not re.match(r"^[\d\s\.\-/]+$", l)
-                          and not any(sw in l.lower() for sw in _junk_sw)]
             product_name = " ".join(desc_lines[:2]).title() if len(desc_lines) >= 2 else brand
 
         # Promotional messages — skip lines that are mostly garbled (single chars/symbols)
