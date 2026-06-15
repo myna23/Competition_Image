@@ -54,6 +54,7 @@ _COUNTRY_MAP: dict[str, str] = {
     "usa": "United States", "u.s.a.": "United States", "u.s.": "United States",
     "america": "United States",
     "prc": "China", "p.r.c.": "China", "pr china": "China",
+    "xiamen": "China", "guangzhou": "China", "shenzhen": "China", "beijing": "China",
     "uae": "United Arab Emirates", "u.a.e.": "United Arab Emirates",
     "eu": "European Union",
     "dr congo": "Democratic Republic of Congo", "drc": "Democratic Republic of Congo",
@@ -257,11 +258,12 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
         wt_m = re.search(r"(\d+\.?\d*)\s*(g|ml|kg|l|G|ML|KG|L)\b", all_text, re.I)
         weight = (wt_m.group(1) + wt_m.group(2).lower()) if wt_m else "N/A"
 
-        # Manufacturer
+        # Manufacturer — match multiple attribution phrases
         mfr_m = re.search(
-            r"(?:manufactured by|mfd by|mfr)[:\s]+([A-Za-z][\w\s]+(limited|ltd|co\.|company|inc)?)",
+            r"(?:manufactured by|mfd by|mfr|marketed by|imported(?:\s*&\s*marketed)? by"
+            r"|distributed by|produced by)[:\s]+([A-Za-z][A-Za-z\s&,\.]{3,50}?)(?:\n|$|tel:|p\.o|email)",
             all_text, re.I)
-        manufacturer = mfr_m.group(1).strip().title() if mfr_m else "N/A"
+        manufacturer = re.sub(r"\s+", " ", mfr_m.group(1)).strip().title() if mfr_m else "N/A"
 
         # Country — phrase match, then bare token scan
         cty_m = re.search(
@@ -270,10 +272,10 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
         if cty_m:
             raw_cty = re.split(r"[\n,\.]", cty_m.group(1))[0].strip()
             country = _norm_country(raw_cty)
-        elif re.search(r"\bPRC\b|\bP\.R\.C\.?\b", ocr_text, re.I):
+        elif re.search(r"\bPR[CG]\b|\bP\.R\.C\.?\b", all_text, re.I):
             country = "China"
         else:
-            for abbr in ("usa", "uk", "ghana", "nigeria", "china", "kenya", "india"):
+            for abbr in ("xiamen", "ghana", "nigeria", "china", "kenya", "india", "usa", "uk"):
                 if abbr in all_text.lower():
                     country = _norm_country(abbr)
                     break
@@ -346,7 +348,13 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             if freq:
                 brand = max(freq, key=freq.get).title()
 
-        # Strategy 4: fallback to first non-junk line
+        # Strategy 4: derive brand from manufacturer first word
+        if brand == "N/A" and manufacturer != "N/A":
+            first_word = manufacturer.split()[0]
+            if first_word.upper() not in _non_brand and len(first_word) >= 3:
+                brand = first_word
+
+        # Strategy 5: fallback to first non-junk line
         if brand == "N/A" and lines:
             brand = lines[0].title()
 
@@ -366,9 +374,17 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
                           and not any(sw in l.lower() for sw in _junk_sw)]
             product_name = " ".join(desc_lines[:2]).title() if len(desc_lines) >= 2 else brand
 
-        # Promotional messages
+        # Promotional messages — skip lines that are mostly garbled (single chars/symbols)
+        def _looks_valid(text: str) -> bool:
+            words = text.split()
+            if not words:
+                return False
+            real_words = [w for w in words if len(w) >= 3 and w.isalpha()]
+            return len(real_words) >= len(words) * 0.4  # at least 40% are real words
+
         promo_lines = [l for l in desc_lines[2:] if len(l) > 8
-                       and not re.match(r"^[\d\s]+$", l)]
+                       and not re.match(r"^[\d\s]+$", l)
+                       and _looks_valid(l)]
         promo = promo_lines[0] if promo_lines else "N/A"
 
         # ── NLP keyword category + segment classification ─────────────────────
