@@ -220,16 +220,26 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             thresh = cv2.resize(thresh, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
         ocr_img = Image.fromarray(thresh)
 
-        # ── Tesseract OCR — two passes for better coverage ────────────────────
-        # Pass 1: preprocessed image (good for small dense text)
+        # ── Tesseract OCR — main pass on preprocessed image ──────────────────
         ocr_text = pytesseract.image_to_string(ocr_img, config="--psm 3 --oem 3")
-        # Pass 2: original PIL image (good for logo/color text the threshold destroys)
+
+        # ── Logo OCR — top quarter of ORIGINAL image for brand name ──────────
+        # Brand logos (coloured text on background) are destroyed by thresholding;
+        # run a separate sparse-text pass on the unprocessed top region.
+        logo_text = ""
         try:
-            ocr_orig = pytesseract.image_to_string(img, config="--psm 3 --oem 3")
-            ocr_text = ocr_orig + "\n" + ocr_text  # original first so logo text wins
+            h_img, w_img = img_np.shape[:2]
+            logo_np = img_np[: h_img // 3, :]           # top third
+            # invert if median is dark (white text on dark bg → black on white)
+            logo_gray_tmp = cv2.cvtColor(logo_np, cv2.COLOR_RGB2GRAY)
+            if logo_gray_tmp.mean() < 100:
+                logo_np = cv2.bitwise_not(logo_np)
+            logo_text = pytesseract.image_to_string(
+                Image.fromarray(logo_np), config="--psm 11 --oem 3")
         except Exception:
             pass
-        all_text  = " ".join(ocr_text.split())
+
+        all_text  = " ".join((logo_text + "\n" + ocr_text).split())
         lines     = [l.strip() for l in ocr_text.splitlines() if len(l.strip()) > 2]
         ocr_conf  = 82
 
@@ -290,15 +300,31 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             "WEIGHT", "NETT", "TOTAL", "EACH", "SIZE", "FOOD", "PACK",
         }
 
-        # Strategy 1: word that appears DIRECTLY BEFORE a product-type keyword
         _prod_kw = (r"(?:seasoning|powder|sauce|soap|lotion|shampoo|juice|biscuit|"
                     r"cream|oil|chocolate|detergent|toothpaste|noodle|rice|sardine|"
                     r"mackerel|drink|beverage|tea|coffee|water|milk|beer|wine)")
-        brand_pre = re.search(rf"([A-Z][A-Za-z']+)\s+{_prod_kw}", ocr_text, re.I)
-        if brand_pre:
-            candidate = brand_pre.group(1).strip()
-            if candidate.upper() not in _non_brand and len(candidate) >= 3:
-                brand = candidate.title()
+
+        # Strategy 0: logo region text — highest priority, cleanest source
+        if logo_text:
+            logo_brand = re.search(rf"([A-Z][A-Za-z']+)\s+{_prod_kw}", logo_text, re.I)
+            if logo_brand:
+                candidate = logo_brand.group(1).strip()
+                if candidate.upper() not in _non_brand and len(candidate) >= 3:
+                    brand = candidate.title()
+            # Also try ALL-CAPS in logo region
+            if brand == "N/A":
+                logo_caps = [w for w in re.findall(r"\b[A-Z]{4,}\b", logo_text)
+                             if w not in _non_brand]
+                if logo_caps:
+                    brand = logo_caps[0].title()
+
+        # Strategy 1: word directly before a product-type keyword in main OCR
+        if brand == "N/A":
+            brand_pre = re.search(rf"([A-Z][A-Za-z']+)\s+{_prod_kw}", ocr_text, re.I)
+            if brand_pre:
+                candidate = brand_pre.group(1).strip()
+                if candidate.upper() not in _non_brand and len(candidate) >= 3:
+                    brand = candidate.title()
 
         # Strategy 2: "Marketed By / Imported By / Distributed By"
         if brand == "N/A":
@@ -324,10 +350,10 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
         if brand == "N/A" and lines:
             brand = lines[0].title()
 
-        # ── Product name: find the span "Brand + product-type + flavor/variant" ─
+        # ── Product name: logo region first, then main OCR ───────────────────
         pn_m = re.search(
             rf"([A-Z][A-Za-z']+\s+{_prod_kw}[^,\n]{{0,40}})",
-            ocr_text, re.I)
+            logo_text + "\n" + ocr_text, re.I)
         if pn_m:
             product_name = re.sub(r"\s+", " ", pn_m.group(1)).strip().title()
         else:
