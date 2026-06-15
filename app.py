@@ -694,11 +694,14 @@ with tab_table:
                 LABELS[c]: [r.get(f"_conf_{c}", 0) for r in rows]
                 for c in IMDB_COLS
             }
-            hm_df = pd.DataFrame(hm_data, index=[r["image"] for r in rows])
-            st.dataframe(
-                hm_df.style.background_gradient(cmap="RdYlGn", vmin=0, vmax=100),
-                use_container_width=True,
-            )
+            hm_df = pd.DataFrame(hm_data, index=[r.get("product_name") or r["image"] for r in rows])
+            try:
+                st.dataframe(
+                    hm_df.style.background_gradient(cmap="RdYlGn", vmin=0, vmax=100),
+                    use_container_width=True,
+                )
+            except Exception:
+                st.dataframe(hm_df, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
