@@ -221,28 +221,47 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             thresh = cv2.resize(thresh, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
         ocr_img = Image.fromarray(thresh)
 
-        # ── Tesseract OCR — main pass on preprocessed image ──────────────────
-        ocr_text = pytesseract.image_to_string(ocr_img, config="--psm 3 --oem 3")
+        # ── Tesseract OCR with per-word confidence filtering ─────────────────
+        # image_to_data returns TSV with confidence per word; drop garbled words
+        def _conf_filtered_ocr(pil_img, config="--psm 3 --oem 3", min_conf=30):
+            tsv = pytesseract.image_to_data(pil_img, config=config)
+            words, lines_d = [], {}
+            for row in tsv.strip().split("\n")[1:]:
+                parts = row.split("\t")
+                if len(parts) < 12:
+                    continue
+                try:
+                    conf = int(parts[10])
+                    word = parts[11].strip()
+                except (ValueError, IndexError):
+                    continue
+                if not word:
+                    continue
+                if conf >= min_conf:
+                    words.append(word)
+                    line_key = (parts[1], parts[2], parts[3], parts[4])
+                    lines_d.setdefault(line_key, []).append(word)
+            flat = " ".join(words)
+            line_list = [" ".join(v) for v in lines_d.values() if v]
+            return flat, line_list
 
-        # ── Logo OCR — top quarter of ORIGINAL image for brand name ──────────
-        # Brand logos (coloured text on background) are destroyed by thresholding;
-        # run a separate sparse-text pass on the unprocessed top region.
+        ocr_text, lines = _conf_filtered_ocr(ocr_img)
+
+        # Logo region: top third of ORIGINAL image with PSM 11 (sparse/logo text)
         logo_text = ""
         try:
             h_img, w_img = img_np.shape[:2]
-            logo_np = img_np[: h_img // 3, :]           # top third
-            # invert if median is dark (white text on dark bg → black on white)
+            logo_np = img_np[: h_img // 3, :]
             logo_gray_tmp = cv2.cvtColor(logo_np, cv2.COLOR_RGB2GRAY)
-            if logo_gray_tmp.mean() < 100:
+            if logo_gray_tmp.mean() < 100:        # dark bg → invert
                 logo_np = cv2.bitwise_not(logo_np)
-            logo_text = pytesseract.image_to_string(
-                Image.fromarray(logo_np), config="--psm 11 --oem 3")
+            logo_text, _ = _conf_filtered_ocr(
+                Image.fromarray(logo_np), config="--psm 11 --oem 3", min_conf=40)
         except Exception:
             pass
 
-        all_text  = " ".join((logo_text + "\n" + ocr_text).split())
-        lines     = [l.strip() for l in ocr_text.splitlines() if len(l.strip()) > 2]
-        ocr_conf  = 82
+        all_text = " ".join((logo_text + " " + ocr_text).split())
+        ocr_conf = 82
 
         def _conf(found: bool) -> int:
             return ocr_conf if found else 45
