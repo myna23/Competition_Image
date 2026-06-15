@@ -524,6 +524,16 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
         if brand == "N/A" and lines:
             brand = lines[0].title()
 
+        # Extend brand with preceding word if it forms a 2-word brand (e.g. "Mummy's Kitchen")
+        if brand and brand != "N/A":
+            ext_m = re.search(
+                rf"([A-Z][A-Za-z']+)\s+{re.escape(brand)}\b",
+                logo_text + " " + ocr_text, re.I)
+            if ext_m:
+                prefix = ext_m.group(1).strip()
+                if prefix.upper() not in _non_brand and len(prefix) >= 3:
+                    brand = prefix.title() + " " + brand
+
         # ── Product name: logo region first, then main OCR ───────────────────
         _junk_sw = ["ingredient", "direction", "storage", "imported", "marketed",
                     "batch", "expiry", "prod date", "tel:", "p.o", "email", "www",
@@ -544,13 +554,20 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
         # If product name looks garbled (contains ! or is very short), reconstruct from components
         if "!" in product_name or len(product_name) < len(brand) + 5:
             pn_parts = [brand]
-            for kw in ["Seasoning", "Powder", "Sauce", "Soap", "Lotion", "Cream",
+            _pn_joined = " ".join(pn_parts).lower()
+            for kw in ["Seasoning", "Powder", "Soap", "Lotion", "Cream",
                        "Drink", "Juice", "Tea", "Coffee", "Chocolate"]:
-                if re.search(rf"\b{kw}\b", all_text, re.I) and kw.lower() not in " ".join(pn_parts).lower():
+                if re.search(rf"\b{kw}\b", all_text, re.I) and kw.lower() not in _pn_joined:
                     pn_parts.append(kw)
-            for fw in ["Ginger", "Garlic", "Vanilla", "Chocolate", "Strawberry",
+                    _pn_joined = " ".join(pn_parts).lower()
+            # Only add "Sauce" if no other product type already added (avoids direction text false match)
+            if "sauce" not in _pn_joined and not any(w in _pn_joined for w in ["seasoning","powder","drink","soap"]):
+                if re.search(r"\bsauce\b", all_text, re.I):
+                    pn_parts.append("Sauce")
+                    _pn_joined = " ".join(pn_parts).lower()
+            for fw in ["Ginger", "Garlic", "Vanilla", "Strawberry",
                        "Orange", "Lemon", "Mint", "Spicy", "Original", "Flavor", "Flavour"]:
-                if re.search(rf"\b{fw}\b", all_text, re.I) and fw.lower() not in " ".join(pn_parts).lower():
+                if re.search(rf"\b{fw}\b", all_text, re.I) and fw.lower() not in _pn_joined:
                     pn_parts.append(fw)
             if len(pn_parts) > 1:
                 product_name = " ".join(pn_parts)
