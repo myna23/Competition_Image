@@ -220,8 +220,15 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             thresh = cv2.resize(thresh, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
         ocr_img = Image.fromarray(thresh)
 
-        # ── Tesseract OCR text extraction ─────────────────────────────────────
+        # ── Tesseract OCR — two passes for better coverage ────────────────────
+        # Pass 1: preprocessed image (good for small dense text)
         ocr_text = pytesseract.image_to_string(ocr_img, config="--psm 3 --oem 3")
+        # Pass 2: original PIL image (good for logo/color text the threshold destroys)
+        try:
+            ocr_orig = pytesseract.image_to_string(img, config="--psm 3 --oem 3")
+            ocr_text = ocr_orig + "\n" + ocr_text  # original first so logo text wins
+        except Exception:
+            pass
         all_text  = " ".join(ocr_text.split())
         lines     = [l.strip() for l in ocr_text.splitlines() if len(l.strip()) > 2]
         ocr_conf  = 82
@@ -263,12 +270,13 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             else:
                 country = "N/A"
 
-        # Packaging
-        pkg_map = {"bottle": "Bottle", "sachet": "Sachet", "can": "Can",
-                   "box": "Cardboard Box", "carton": "Carton", "pouch": "Pouch",
-                   "jar": "Jar", "tube": "Tube", "bag": "Plastic Bag",
-                   "powder": "Sachet", "tin": "Tin"}
-        packaging = next((v for k, v in pkg_map.items() if k in all_text.lower()), "N/A")
+        # Packaging — use word boundary to avoid "can" matching "scan" etc.
+        pkg_map = [("sachet", "Sachet"), ("pouch", "Pouch"), ("carton", "Carton"),
+                   ("bottle", "Bottle"), ("tin", "Tin"), ("jar", "Jar"),
+                   ("tube", "Tube"), ("box", "Cardboard Box"), ("bag", "Plastic Bag"),
+                   ("can", "Can"), ("powder", "Sachet")]
+        packaging = next(
+            (v for k, v in pkg_map if re.search(rf"\b{k}\b", all_text, re.I)), "N/A")
 
         # ── Brand detection ───────────────────────────────────────────────────
         brand = "N/A"
