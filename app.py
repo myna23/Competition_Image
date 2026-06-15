@@ -1,7 +1,7 @@
 """
 IMDB Auto-Fill Tool — AI-Driven Image to Item Master Database
 =============================================================
-Upload product images → Claude Vision extracts 10 IMDB attributes → Export CSV / Excel
+Upload product images → EasyOCR + EfficientNet CNN extracts 10 IMDB attributes → Export CSV / Excel
 
 Run:  streamlit run app.py
 """
@@ -11,15 +11,11 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import streamlit as st
-import base64, json, io, os, re
+import io, os, re
+import numpy as np
 from PIL import Image, ImageEnhance
 import pandas as pd
 from datetime import datetime
-
-try:
-    import anthropic as _anthropic
-except ImportError:
-    _anthropic = None  # handled at runtime with a friendly message
 
 # ─── IMDB Schema ──────────────────────────────────────────────────────────────
 
@@ -88,11 +84,11 @@ def _validate_barcode(val: str) -> tuple[bool, str]:
     digits = re.sub(r"[\s\-]", "", val)
     return _BARCODE_RE.match(digits) is not None, digits
 
-# ─── Claude Vision ────────────────────────────────────────────────────────────
+# ─── ML Model Configuration ───────────────────────────────────────────────────
 
 MODELS = {
-    "AI Vision Model — High Accuracy": "claude-opus-4-8",
-    "AI Vision Model — Fast":          "claude-sonnet-4-6",
+    "High Accuracy (slower)": "high",
+    "Fast":                   "fast",
 }
 
 # ─── Demo data (used when Demo Mode is on — no API key needed) ────────────────
@@ -152,56 +148,49 @@ _DEMO_ROWS = [
     },
 ]
 
-_SYSTEM = (
-    "You are an expert retail product analyst specialising in extracting structured data "
-    "from product images for Item Master Database (IMDB) cataloging. "
-    "Always respond with valid JSON only — never add markdown fences or explanation."
-)
+_CONF_LOW  = 60
+_CONF_HIGH = 85
 
-_PROMPT = """Analyse this product image and return a JSON object with exactly these 10 IMDB fields.
-
-Return ONLY the JSON — no markdown, no prose, just the object.
-
-{
-  "barcode":              {"value": "...", "confidence": 0},
-  "category_type":        {"value": "...", "confidence": 0},
-  "segment_type":         {"value": "...", "confidence": 0},
-  "manufacturer":         {"value": "...", "confidence": 0},
-  "brand":                {"value": "...", "confidence": 0},
-  "product_name":         {"value": "...", "confidence": 0},
-  "weight_and_unit":      {"value": "...", "confidence": 0},
-  "packaging_type":       {"value": "...", "confidence": 0},
-  "country_of_origin":    {"value": "...", "confidence": 0},
-  "promotional_messages": {"value": "...", "confidence": 0}
+# ─── EfficientNet category map ────────────────────────────────────────────────
+_CATEGORY_MAP = {
+    "soap": ("Personal Care", "Bar Soap"),
+    "lotion": ("Personal Care", "Body Lotion"),
+    "shampoo": ("Personal Care", "Hair Care"),
+    "toothbrush": ("Personal Care", "Oral Care"),
+    "perfume": ("Personal Care", "Fragrance"),
+    "sunscreen": ("Personal Care", "Skin Care"),
+    "lipstick": ("Personal Care", "Cosmetics"),
+    "bottle": ("Food & Beverage", "Juice Drinks"),
+    "orange": ("Food & Beverage", "Juice Drinks"),
+    "lemon": ("Food & Beverage", "Juice Drinks"),
+    "coffee": ("Food & Beverage", "Hot Beverages"),
+    "chocolate": ("Food & Beverage", "Chocolate Drinks"),
+    "candy": ("Food & Beverage", "Confectionery"),
+    "bread": ("Food & Beverage", "Bakery"),
+    "spice": ("Food & Beverage", "Seasonings & Spices"),
+    "salt": ("Food & Beverage", "Seasonings & Spices"),
+    "sauce": ("Food & Beverage", "Sauces & Condiments"),
+    "beer": ("Food & Beverage", "Alcoholic Beverages"),
+    "wine": ("Food & Beverage", "Alcoholic Beverages"),
+    "water": ("Food & Beverage", "Water"),
+    "milk": ("Food & Beverage", "Dairy"),
+    "pretzel": ("Food & Beverage", "Snacks"),
+    "packet": ("Food & Beverage", "Packaged Foods"),
 }
 
-Field definitions:
-• barcode — Numeric barcode (EAN-8, EAN-13, UPC-A, UPC-E). Read every digit carefully. Use "N/A" if not visible.
-• category_type — Broad category: "Food & Beverage", "Personal Care", "Household Cleaning", "Health & Wellness", "Pet Care", "Stationery", "Baby Care", "Electronics Accessories", etc.
-• segment_type — Sub-category within category: "Dairy Products", "Carbonated Beverages", "Snacks & Confectionery", "Hair Care", "Surface Cleaners", "Vitamins & Supplements", "Infant Formula", etc.
-• manufacturer — Legal company that manufactures the product (may differ from brand owner). Look for small print like "Manufactured by..." or "Distributed by...".
-• brand — Primary brand name as displayed on the pack (use exact capitalisation).
-• product_name — Full descriptive product name including variant/flavour (e.g. "Coca-Cola Zero Sugar Cherry 500ml Can").
-• weight_and_unit — Net weight or volume with unit. Prefer metric: "500g", "1.5L", "250ml", "6×50g". Use "N/A" if not visible.
-• packaging_type — Primary format: "Bottle", "Can", "Cardboard Box", "Foil Pouch", "Plastic Bag", "Glass Jar", "Tube", "Blister Pack", "Carton", "Sachet", "Tray", "Aerosol Can", "Tetra Pak".
-• country_of_origin — Full country name (e.g. "South Africa", NOT "RSA"). Look for "Made in", "Product of", or flag graphics. Use "N/A" if not visible.
-• promotional_messages — Any slogans, claims, certifications, or limited-time offers on pack (e.g. "New Improved Formula", "Buy 2 Get 1 Free", "Certified Organic", "Halal Certified"). Use "N/A" if none.
+@st.cache_resource(show_spinner="Loading EasyOCR model…")
+def _load_ocr():
+    import easyocr
+    return easyocr.Reader(["en"], gpu=False, verbose=False)
 
-Confidence scoring:
-• 90–100  Clearly legible and unambiguous
-• 70–89   Visible but small or slightly obscured
-• 40–69   Partially visible or inferred from context
-• 1–39    Guessed from brand / product type knowledge
-• 0       Cannot determine — set value to "N/A"
-
-Normalisation rules:
-• Spell out country names in full
-• Use metric units when multiple unit systems are shown
-• Barcode: digits only, no spaces or hyphens"""
-
-_CONF_LOW  = 60   # below this → flag for review
-_CONF_HIGH = 85   # above this → green
-
+@st.cache_resource(show_spinner="Loading EfficientNet CNN…")
+def _load_cnn():
+    import torch
+    from torchvision.models import efficientnet_b0, EfficientNet_B0_Weights
+    weights = EfficientNet_B0_Weights.IMAGENET1K_V1
+    model = efficientnet_b0(weights=weights)
+    model.eval()
+    return model, weights
 
 def _preprocess(img: Image.Image, enhance: bool = True) -> Image.Image:
     if max(img.size) > 1920:
@@ -213,38 +202,91 @@ def _preprocess(img: Image.Image, enhance: bool = True) -> Image.Image:
         img = ImageEnhance.Sharpness(img).enhance(1.5)
     return img
 
-
-def _to_b64(img: Image.Image) -> str:
-    buf = io.BytesIO()
-    img.save(buf, format="JPEG", quality=92)
-    return base64.standard_b64encode(buf.getvalue()).decode()
-
-
-def _call_claude(client, img_b64: str, model: str) -> tuple[dict | None, str | None]:
+def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
     try:
-        resp = client.messages.create(
-            model=model,
-            max_tokens=1400,
-            system=_SYSTEM,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": "image/jpeg", "data": img_b64},
-                    },
-                    {"type": "text", "text": _PROMPT},
-                ],
-            }],
-        )
-        raw = resp.content[0].text.strip()
-        # Strip accidental markdown fences
-        if raw.startswith("```"):
-            lines = raw.splitlines()
-            raw = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
-        return json.loads(raw), None
-    except json.JSONDecodeError as e:
-        return None, f"JSON parse error: {e}"
+        import torch
+        import torchvision.transforms as T
+
+        img_np = np.array(img)
+
+        # ── EasyOCR text extraction ───────────────────────────────────────────
+        ocr = _load_ocr()
+        raw_texts = ocr.readtext(img_np, detail=1, paragraph=False)
+        texts = [(r[1].strip(), round(r[2] * 100, 1)) for r in raw_texts if r[2] > 0.3]
+        all_text = " ".join(t for t, _ in texts)
+        lines = [t for t, _ in texts]
+        avg_ocr_conf = round(sum(c for _, c in texts) / len(texts), 1) if texts else 50
+
+        def _ocr_conf(found: bool) -> int:
+            return min(int(avg_ocr_conf), 95) if found else 45
+
+        # Barcode
+        bc_m = re.search(r"\b(\d{8,14})\b", all_text)
+        barcode = bc_m.group(1) if bc_m else "N/A"
+
+        # Weight
+        wt_m = re.search(r"(\d+\.?\d*)\s*(g|ml|kg|l|G|ML|KG|L)\b", all_text, re.I)
+        weight = (wt_m.group(1) + wt_m.group(2).lower()) if wt_m else "N/A"
+
+        # Manufacturer
+        mfr_m = re.search(r"(?:manufactured by|mfd by|mfr)[:\s]+([A-Za-z][\w\s]+(limited|ltd|co\.|company|inc)?)",
+                           all_text, re.I)
+        manufacturer = mfr_m.group(1).strip().title() if mfr_m else "N/A"
+
+        # Country
+        cty_m = re.search(r"(?:made in|product of|country of origin)[:\s]+([A-Za-z\s]+)", all_text, re.I)
+        country = cty_m.group(1).strip().title() if cty_m else "N/A"
+
+        # Packaging
+        pkg_map = {"bottle": "Bottle", "sachet": "Sachet", "can": "Can",
+                   "box": "Cardboard Box", "carton": "Carton", "pouch": "Pouch",
+                   "jar": "Jar", "tube": "Tube", "bag": "Plastic Bag"}
+        packaging = next((v for k, v in pkg_map.items() if k in all_text.lower()), "N/A")
+
+        brand       = lines[0].title() if lines else "N/A"
+        product_name = " ".join(lines[:2]).title() if len(lines) >= 2 else brand
+        promo_lines  = [t for t, _ in texts if len(t) > 8 and t not in (brand, product_name)
+                        and not re.match(r"^[\d\s]+$", t)]
+        promo = promo_lines[0] if promo_lines else "N/A"
+
+        # ── EfficientNet-B0 category classification ───────────────────────────
+        cnn_model, weights = _load_cnn()
+        preprocess = T.Compose([
+            T.Resize(256), T.CenterCrop(224), T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        ])
+        tensor = preprocess(img).unsqueeze(0)
+        categories = weights.meta["categories"]
+        with torch.no_grad():
+            probs = torch.softmax(cnn_model(tensor), dim=1)[0]
+        top_probs, top_idxs = probs.topk(5)
+        top_preds = [(categories[i], round(p.item() * 100, 2))
+                     for i, p in zip(top_idxs, top_probs)]
+
+        cat_type, seg_type, cnn_conf = "Food & Beverage", "General", 40
+        for cls_name, prob in top_preds:
+            for kw, (cat, seg) in _CATEGORY_MAP.items():
+                if kw in cls_name.lower():
+                    cat_type, seg_type, cnn_conf = cat, seg, int(prob)
+                    break
+            if cnn_conf > 40:
+                break
+
+        # ── Build result in standard format ──────────────────────────────────
+        result = {
+            "barcode":              {"value": barcode,      "confidence": _ocr_conf(barcode != "N/A")},
+            "category_type":        {"value": cat_type,     "confidence": max(cnn_conf, 55)},
+            "segment_type":         {"value": seg_type,     "confidence": max(cnn_conf - 5, 50)},
+            "manufacturer":         {"value": manufacturer, "confidence": _ocr_conf(manufacturer != "N/A")},
+            "brand":                {"value": brand,        "confidence": _ocr_conf(bool(brand))},
+            "product_name":         {"value": product_name, "confidence": _ocr_conf(bool(product_name))},
+            "weight_and_unit":      {"value": weight,       "confidence": _ocr_conf(weight != "N/A")},
+            "packaging_type":       {"value": packaging,    "confidence": _ocr_conf(packaging != "N/A")},
+            "country_of_origin":    {"value": country,      "confidence": _ocr_conf(country != "N/A")},
+            "promotional_messages": {"value": promo,        "confidence": _ocr_conf(promo != "N/A")},
+        }
+        return result, None
+
     except Exception as e:
         return None, str(e)
 
@@ -390,29 +432,12 @@ with st.sidebar:
     st.divider()
 
     demo_mode = st.toggle(
-        "Demo Mode (no API key needed)",
+        "Demo Mode",
         value=False,
-        help="Load sample product data to preview the full workflow without an API key",
+        help="Load 4 sample Ghanaian products instantly — no upload needed",
     )
 
-    if not demo_mode:
-        # Resolve key: .env → Streamlit secrets → sidebar input
-        try:
-            _default_key = st.secrets.get("ANTHROPIC_API_KEY", "") or os.getenv("ANTHROPIC_API_KEY", "")
-        except Exception:
-            _default_key = os.getenv("ANTHROPIC_API_KEY", "")
-
-        api_key = st.text_input(
-            "API Key",
-            value=_default_key,
-            type="password",
-            placeholder="Enter your API key…",
-            help="Set via Streamlit secrets, .env file, or paste here",
-        )
-    else:
-        api_key = ""
-
-    model_label = st.selectbox("Model", list(MODELS), disabled=demo_mode)
+    model_label = st.selectbox("Extraction Speed", list(MODELS), disabled=demo_mode)
     selected_model = MODELS[model_label]
 
     enhance = st.checkbox(
@@ -437,7 +462,7 @@ if "rows" not in st.session_state:
 st.title("🏷️ AI-Driven Image-to-IMDB Auto-Fill")
 st.markdown(
     "Upload product images to automatically extract all 10 Item Master Database attributes "
-    "using AI Vision, then review, edit, and export to CSV or Excel."
+    "using EasyOCR + EfficientNet CNN, then review, edit, and export to CSV or Excel."
 )
 
 tab_upload, tab_table, tab_dupes = st.tabs(
@@ -459,8 +484,8 @@ with tab_upload:
     # ── Demo Mode banner ──────────────────────────────────────────────────────
     if demo_mode:
         st.info(
-            "**Demo Mode is ON** — showing 4 sample products. "
-            "Toggle off in the sidebar to process real images with your API key."
+            "**Demo Mode is ON** — showing 4 sample Ghanaian products. "
+            "Toggle off in the sidebar to upload and process real images."
         )
         if st.button("▶ Load Demo Data", type="primary"):
             existing_names = {r["image"] for r in st.session_state["rows"]}
@@ -485,33 +510,26 @@ with tab_upload:
 
         run = btn_col.button(
             f"▶ Extract {len(new_files)} image(s)",
-            disabled=(not new_files) or (not api_key) or (_anthropic is None),
+            disabled=not new_files,
             type="primary",
             use_container_width=True,
         )
 
-        if _anthropic is None:
-            st.error("The `anthropic` package is not installed. Run: `pip install anthropic`")
-        elif not api_key:
-            st.warning("Enter your API key in the sidebar to proceed.")
-
-        if run and new_files and api_key and _anthropic:
-            client = _anthropic.Anthropic(api_key=api_key)
+        if run and new_files:
             progress_bar = st.progress(0.0, text="Starting…")
             status_msg   = st.empty()
 
             for idx, file in enumerate(new_files):
                 frac = idx / len(new_files)
                 progress_bar.progress(frac, text=f"Processing {file.name} ({idx + 1}/{len(new_files)})…")
-                status_msg.info(f"Analysing **{file.name}** ({idx + 1}/{len(new_files)})…")
+                status_msg.info(f"Analysing **{file.name}** with EasyOCR + EfficientNet CNN ({idx + 1}/{len(new_files)})…")
 
                 try:
                     raw_bytes = file.read()
                     img = Image.open(io.BytesIO(raw_bytes))
                     img = _preprocess(img, enhance=enhance)
-                    img_b64 = _to_b64(img)
 
-                    result, err = _call_claude(client, img_b64, selected_model)
+                    result, err = _extract_ml(img)
 
                     if err:
                         st.error(f"**{file.name}**: {err}")
