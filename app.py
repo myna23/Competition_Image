@@ -456,6 +456,13 @@ with st.sidebar:
 
 if "rows" not in st.session_state:
     st.session_state["rows"] = []
+if "last_demo_mode" not in st.session_state:
+    st.session_state["last_demo_mode"] = demo_mode
+
+# Clear rows when demo mode is toggled off
+if st.session_state["last_demo_mode"] != demo_mode:
+    st.session_state["rows"] = []
+    st.session_state["last_demo_mode"] = demo_mode
 
 # ── Header ────────────────────────────────────────────────────────────────────
 
