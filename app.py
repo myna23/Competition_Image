@@ -273,29 +273,33 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
         # ── Brand detection ───────────────────────────────────────────────────
         brand = "N/A"
 
-        # Strategy 1: look for "Marketed By / Imported By / Distributed By / Brand:"
-        mkt_m = re.search(
-            r"(?:imported\s*(?:&|and)\s*marketed by|marketed by|distributed by|brand\s*:)[:\s]+([A-Z][a-zA-Z]+)",
-            all_text, re.I)
-        if mkt_m:
-            brand = mkt_m.group(1).strip().title()
+        # Strategy 1: "Marketed By / Imported By / Distributed By"
+        for mkt_pat in [r"marketed\s+by[:\s]+([A-Z][a-zA-Z]+)",
+                        r"imported\s+by[:\s]+([A-Z][a-zA-Z]+)",
+                        r"distributed\s+by[:\s]+([A-Z][a-zA-Z]+)",
+                        r"brand\s*:[:\s]+([A-Z][a-zA-Z]+)"]:
+            mkt_m = re.search(mkt_pat, all_text, re.I)
+            if mkt_m:
+                brand = mkt_m.group(1).strip().title()
+                break
 
-        # Strategy 2: ALL-CAPS logo words — with a thorough stop list
+        # Strategy 2: most-frequent ALL-CAPS word ≥4 chars (brand logos repeat in text)
         if brand == "N/A":
             _caps_stop = {
-                "THE", "AND", "FOR", "WITH", "FROM", "OF", "IN", "BY", "A", "IS",
                 "MADE", "INGREDIENT", "INGREDIENTS", "DIRECTION", "DIRECTIONS",
-                "STORAGE", "NET", "WEIGHT", "SERVING", "BATCH", "PROD", "EXP",
-                "DATE", "IMPORTED", "MARKETED", "DISTRIBUTED", "PRODUCED",
-                "PRODUCT", "CONTENTS", "WARNING", "CAUTION", "NOTE", "KEEP",
-                "BEST", "USE", "BEFORE", "AFTER", "OPEN", "STORE", "COOL", "DRY",
-                "USING", "ONE", "TWO", "ADD", "MIX", "BAUD", "TEL", "EMAIL",
-                "PRC", "USA", "UK", "LTD", "CO", "INC", "LLC",
+                "STORAGE", "STOCKAGE", "KEEP", "COOL", "STORE", "OPEN",
+                "SERVING", "BATCH", "PROD", "EXPIRY", "DATE", "BEST", "BEFORE",
+                "IMPORTED", "MARKETED", "DISTRIBUTED", "PRODUCED", "PRODUCT",
+                "USING", "SPOON", "LIQUID", "SAUCE", "DISH", "AMOUNT", "ACTUAL",
+                "CONTENTS", "WARNING", "CAUTION", "NOTE", "EMAIL", "PHONE",
+                "WEIGHT", "NETT", "TOTAL", "EACH", "SIZE",
             }
-            caps_words = [w for w in re.findall(r"\b[A-Z]{3,}\b", ocr_text)
-                          if w not in _caps_stop]
-            if caps_words:
-                brand = caps_words[0].title()
+            freq: dict[str, int] = {}
+            for w in re.findall(r"\b[A-Z]{4,}\b", ocr_text):
+                if w not in _caps_stop:
+                    freq[w] = freq.get(w, 0) + 1
+            if freq:
+                brand = max(freq, key=freq.get).title()
 
         # Strategy 3: fallback to first non-junk line
         if brand == "N/A" and lines:
