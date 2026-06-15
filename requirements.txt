@@ -9,3 +9,4 @@ python-dotenv>=1.0.0
 matplotlib>=3.7.0
 pytesseract>=0.3.10
 opencv-python-headless>=4.8.0
+pyzbar>=0.1.9

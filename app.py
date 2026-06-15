@@ -190,19 +190,50 @@ def _preprocess(img: Image.Image, enhance: bool = True) -> Image.Image:
 def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
     try:
         import pytesseract
+        import cv2
+        import numpy as np
+
+        # ── pyzbar barcode detection (runs first, most accurate) ─────────────
+        barcode = "N/A"
+        barcode_conf = 45
+        try:
+            from pyzbar.pyzbar import decode as zbar_decode
+            img_np = np.array(img)
+            zbar_results = zbar_decode(img_np)
+            if zbar_results:
+                barcode = zbar_results[0].data.decode("utf-8").strip()
+                barcode_conf = 99
+        except Exception:
+            pass
+
+        # ── Image preprocessing for better OCR ───────────────────────────────
+        img_np = np.array(img)
+        gray   = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        # Adaptive thresholding sharpens text on varied backgrounds
+        thresh = cv2.adaptiveThreshold(gray, 255,
+                                       cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                       cv2.THRESH_BINARY, 31, 10)
+        # Scale up small images for better OCR
+        h, w = thresh.shape
+        if max(h, w) < 1000:
+            thresh = cv2.resize(thresh, (w * 2, h * 2), interpolation=cv2.INTER_CUBIC)
+        ocr_img = Image.fromarray(thresh)
 
         # ── Tesseract OCR text extraction ─────────────────────────────────────
-        ocr_text = pytesseract.image_to_string(img, config="--psm 3")
+        ocr_text = pytesseract.image_to_string(ocr_img, config="--psm 3 --oem 3")
         all_text  = " ".join(ocr_text.split())
         lines     = [l.strip() for l in ocr_text.splitlines() if len(l.strip()) > 2]
-        ocr_conf  = 80  # pytesseract base confidence
+        ocr_conf  = 82
 
         def _conf(found: bool) -> int:
             return ocr_conf if found else 45
 
-        # Barcode
-        bc_m = re.search(r"\b(\d{8,14})\b", all_text)
-        barcode = bc_m.group(1) if bc_m else "N/A"
+        # Barcode fallback from OCR if pyzbar didn't find one
+        if barcode == "N/A":
+            bc_m = re.search(r"\b(\d{8,14})\b", all_text)
+            if bc_m:
+                barcode = bc_m.group(1)
+                barcode_conf = 60
 
         # Weight
         wt_m = re.search(r"(\d+\.?\d*)\s*(g|ml|kg|l|G|ML|KG|L)\b", all_text, re.I)
@@ -242,7 +273,7 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
                 break
 
         result = {
-            "barcode":              {"value": barcode,       "confidence": _conf(barcode != "N/A")},
+            "barcode":              {"value": barcode,       "confidence": barcode_conf},
             "category_type":        {"value": cat_type,      "confidence": cat_conf},
             "segment_type":         {"value": seg_type,      "confidence": max(cat_conf - 5, 55)},
             "manufacturer":         {"value": manufacturer,  "confidence": _conf(manufacturer != "N/A")},
@@ -602,11 +633,42 @@ with tab_table:
         avg_conf    = sum(r.get("_avg_confidence", 0) for r in rows) / total
         n_ready     = total - n_review
 
-        c1, c2, c3, c4 = st.columns(4)
+        # Time saved calculation (avg manual entry = 8 min/product)
+        manual_mins = total * 8
+        ai_secs     = total * 12
+        time_saved  = manual_mins * 60 - ai_secs
+
+        c1, c2, c3, c4, c5 = st.columns(5)
         c1.metric("Products Processed", total)
         c2.metric("Avg Confidence", f"{avg_conf:.0f}%")
         c3.metric("Needs Human Review", n_review)
         c4.metric("Ready to Export", n_ready)
+        c5.metric("⏱️ Time Saved", f"{time_saved//60:.0f} min {time_saved%60:.0f}s",
+                  help=f"vs ~{manual_mins} min manual entry")
+        st.divider()
+
+        # Confidence breakdown chart
+        with st.expander("📊 Confidence Breakdown by Field", expanded=False):
+            import matplotlib.pyplot as plt
+            field_avgs = {
+                LABELS[c]: round(sum(r.get(f"_conf_{c}", 0) for r in rows) / total)
+                for c in IMDB_COLS
+            }
+            fig, ax = plt.subplots(figsize=(10, 4))
+            colors = ["#2ecc71" if v >= 85 else "#f39c12" if v >= 60 else "#e74c3c"
+                      for v in field_avgs.values()]
+            bars = ax.bar(field_avgs.keys(), field_avgs.values(), color=colors, edgecolor="none")
+            ax.set_ylim(0, 110)
+            ax.axhline(85, color="gray", linestyle="--", alpha=0.5, linewidth=1)
+            ax.set_ylabel("Avg Confidence (%)")
+            ax.set_title("AI Extraction Confidence per IMDB Field", fontweight="bold")
+            plt.xticks(rotation=30, ha="right", fontsize=8)
+            for bar, val in zip(bars, field_avgs.values()):
+                ax.text(bar.get_x() + bar.get_width()/2, val + 1.5,
+                        f"{val}%", ha="center", fontsize=7, fontweight="bold")
+            plt.tight_layout()
+            st.pyplot(fig, use_container_width=True)
+            plt.close()
         st.divider()
 
         # Build editable DataFrame
