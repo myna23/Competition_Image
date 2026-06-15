@@ -167,6 +167,7 @@ _CATEGORY_MAP = {
     "candy": ("Food & Beverage", "Confectionery"),
     "bread": ("Food & Beverage", "Bakery"),
     "spice": ("Food & Beverage", "Seasonings & Spices"),
+    "seasoning": ("Food & Beverage", "Seasonings & Spices"),
     "salt": ("Food & Beverage", "Seasonings & Spices"),
     "sauce": ("Food & Beverage", "Sauces & Condiments"),
     "beer": ("Food & Beverage", "Alcoholic Beverages"),
@@ -245,31 +246,68 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             all_text, re.I)
         manufacturer = mfr_m.group(1).strip().title() if mfr_m else "N/A"
 
-        # Country
-        cty_m = re.search(r"(?:made in|product of|country of origin)[:\s]+([A-Za-z\s]+)", all_text, re.I)
-        country = cty_m.group(1).strip().title() if cty_m else "N/A"
+        # Country — extended patterns including standalone country names
+        cty_m = re.search(
+            r"(?:made in|product of|country of origin|produced in)[:\s]+([A-Za-z][A-Za-z\s\.]+)",
+            all_text, re.I)
+        if cty_m:
+            country = _norm_country(cty_m.group(1).split()[0])  # take first word to avoid runon
+        else:
+            # Fallback: look for known country abbreviations directly in text
+            for abbr in ("prc", "usa", "uk", "ghana", "china", "nigeria"):
+                if abbr in all_text.lower():
+                    country = _norm_country(abbr)
+                    break
+            else:
+                country = "N/A"
 
         # Packaging
         pkg_map = {"bottle": "Bottle", "sachet": "Sachet", "can": "Can",
                    "box": "Cardboard Box", "carton": "Carton", "pouch": "Pouch",
-                   "jar": "Jar", "tube": "Tube", "bag": "Plastic Bag"}
+                   "jar": "Jar", "tube": "Tube", "bag": "Plastic Bag",
+                   "powder": "Sachet", "tin": "Tin"}
         packaging = next((v for k, v in pkg_map.items() if k in all_text.lower()), "N/A")
 
-        # Brand & product name from first meaningful lines
-        brand        = lines[0].title() if lines else "N/A"
-        product_name = " ".join(lines[:2]).title() if len(lines) >= 2 else brand
+        # ── Brand: prioritise ALL-CAPS words (brand names are usually uppercase) ──
+        _stop = {"the", "and", "for", "with", "from", "of", "in", "by", "a", "is",
+                 "made", "ingredients", "directions", "storage", "net", "weight",
+                 "serving", "batch", "prod", "exp", "date", "imported", "marketed"}
+        caps_words = [w for w in re.findall(r"\b[A-Z]{2,}\b", ocr_text)
+                      if w.lower() not in _stop and len(w) >= 3]
+        brand = caps_words[0].title() if caps_words else (lines[0].title() if lines else "N/A")
+
+        # Product name: brand + next descriptive line
+        desc_lines = [l for l in lines
+                      if len(l) > 3
+                      and not re.match(r"^[\d\s\.\-/]+$", l)
+                      and l.lower() not in _stop
+                      and not any(sw in l.lower() for sw in
+                                  ["ingredient", "direction", "storage", "imported", "batch",
+                                   "expiry", "prod date", "tel:", "p.o", "email", "www"])]
+        product_name = " ".join(desc_lines[:2]).title() if len(desc_lines) >= 2 else brand
 
         # Promotional messages
-        promo_lines = [l for l in lines if len(l) > 8
-                       and l not in (brand, product_name)
+        promo_lines = [l for l in desc_lines[2:] if len(l) > 8
                        and not re.match(r"^[\d\s]+$", l)]
         promo = promo_lines[0] if promo_lines else "N/A"
 
-        # ── NLP keyword category classification from OCR text ─────────────────
+        # ── NLP keyword category + segment classification ─────────────────────
         cat_type, seg_type, cat_conf = "Food & Beverage", "Packaged Foods", 60
         for kw, (cat, seg) in _CATEGORY_MAP.items():
             if kw in all_text.lower():
                 cat_type, seg_type, cat_conf = cat, seg, 85
+                break
+        # Extra segment hints from text
+        seg_hints = {
+            "seasoning": "Seasonings & Spices", "spice": "Seasonings & Spices",
+            "powder": "Seasonings & Spices", "juice": "Juice Drinks",
+            "soap": "Bar Soap", "lotion": "Body Lotion", "cream": "Skin Care",
+            "biscuit": "Snacks", "cracker": "Snacks", "noodle": "Noodles",
+            "rice": "Grains & Cereals", "oil": "Cooking Oil",
+        }
+        for hint, seg in seg_hints.items():
+            if hint in all_text.lower():
+                seg_type = seg
                 break
 
         result = {
