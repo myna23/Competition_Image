@@ -160,6 +160,13 @@ _CATEGORY_MAP = {
     "perfume": ("Personal Care", "Fragrance"),
     "sunscreen": ("Personal Care", "Skin Care"),
     "lipstick": ("Personal Care", "Cosmetics"),
+    "tonic": ("Healthcare", "Cough & Cold"),
+    "syrup": ("Healthcare", "Cough & Cold"),
+    "tablet": ("Healthcare", "Tablets & Capsules"),
+    "capsule": ("Healthcare", "Tablets & Capsules"),
+    "medicine": ("Healthcare", "General Medicine"),
+    "supplement": ("Healthcare", "Dietary Supplements"),
+    "vitamin": ("Healthcare", "Dietary Supplements"),
     "bottle": ("Food & Beverage", "Juice Drinks"),
     "orange": ("Food & Beverage", "Juice Drinks"),
     "lemon": ("Food & Beverage", "Juice Drinks"),
@@ -446,15 +453,63 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
 
         # Packaging — exclude "P.O Box" (postal address) from matching "box"
         _no_po_box = not re.search(r"p\.?o\.?\s*box", all_text, re.I)
-        pkg_map = [("sachet", "Sachet"), ("pouch", "Pouch"), ("carton", "Carton"),
-                   ("bottle", "Bottle"), ("tin", "Tin"), ("jar", "Jar"),
-                   ("tube", "Tube"), ("bag", "Plastic Bag"),
-                   ("can", "Can"), ("powder", "Sachet")]
+        pkg_map = [
+            # Healthcare / pharma
+            ("sachet",    "Sachet"),
+            ("blister",   "Blister Pack"),
+            ("ampoule",   "Ampoule"),
+            ("ampule",    "Ampoule"),
+            ("vial",      "Vial"),
+            ("syringe",   "Syringe"),
+            # Pressurised / dispensing
+            ("aerosol",   "Aerosol Can"),
+            ("dispenser", "Dispenser"),
+            # Drinks / dairy
+            ("tetra",     "Tetra Pak"),
+            # Flexible
+            ("pouch",     "Pouch"),
+            ("packet",    "Packet"),
+            ("wrapper",   "Wrapper"),
+            # Rigid containers
+            ("carton",    "Carton"),
+            ("bottle",    "Bottle"),
+            ("tin",       "Tin"),
+            ("jar",       "Jar"),
+            ("tube",      "Tube"),
+            ("drum",      "Drum"),
+            ("bucket",    "Bucket"),
+            ("tray",      "Tray"),
+            ("cup",       "Cup"),
+            ("bag",       "Bag"),
+            ("can",       "Can"),
+            ("stick",     "Stick"),
+            ("wipes",     "Wipes"),
+            # Infer from product form (lower priority — below explicit packaging words)
+            ("tablet",    "Blister Pack"),
+            ("capsule",   "Blister Pack"),
+        ]
         packaging = next(
             (v for k, v in pkg_map if re.search(rf"\b{k}\b", all_text, re.I)), "N/A")
-        # Only fall back to "box" if no postal box address found
+
+        # Hyphenated / multi-word special cases
+        if packaging == "N/A":
+            if re.search(r"\broll[\s-]?on\b", all_text, re.I):
+                packaging = "Roll-On"
+            elif re.search(r"\bspray\b", all_text, re.I):
+                packaging = "Spray Bottle"
+
+        # Box (avoid P.O. Box match)
         if packaging == "N/A" and _no_po_box and re.search(r"\bbox\b", all_text, re.I):
             packaging = "Cardboard Box"
+
+        # Smart fallback: infer from weight unit or liquid keywords
+        if packaging == "N/A":
+            if re.search(r"\d+\s*ml\b", all_text, re.I):
+                packaging = "Bottle"
+            elif re.search(r"\bsyrup\b|\bliquid\b|\bsolution\b", all_text, re.I):
+                packaging = "Bottle"
+            elif re.search(r"\bpowder\b", all_text, re.I):
+                packaging = "Sachet"
 
         # ── Brand detection ───────────────────────────────────────────────────
         brand = "N/A"
@@ -470,7 +525,8 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
 
         _prod_kw = (r"(?:seasoning|powder|sauce|soap|lotion|shampoo|juice|biscuit|"
                     r"cream|oil|chocolate|detergent|toothpaste|noodle|rice|sardine|"
-                    r"mackerel|drink|beverage|tea|coffee|water|milk|beer|wine)")
+                    r"mackerel|drink|beverage|tea|coffee|water|milk|beer|wine|"
+                    r"tonic|syrup|tablet|capsule)")
 
         # Strategy 0: logo region text — highest priority, cleanest source
         if logo_text:
@@ -524,10 +580,13 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
         if brand == "N/A" and lines:
             brand = lines[0].title()
 
-        # Extend brand with preceding word if it forms a 2-word brand (e.g. "Mummy's Kitchen")
+        # Strip trademark symbols from brand before further processing
+        brand = re.sub(r"[®™©]", "", brand).strip()
+
+        # Extend brand with preceding word if it forms a 2-word brand (e.g. "Mummy's Kitchen", "Good Morning")
         if brand and brand != "N/A":
             ext_m = re.search(
-                rf"([A-Z][A-Za-z']+)\s+{re.escape(brand)}\b",
+                rf"([A-Z][A-Za-z']+)\s*[®™©]?\s*{re.escape(brand)}\b",
                 logo_text + " " + ocr_text, re.I)
             if ext_m:
                 prefix = ext_m.group(1).strip()
@@ -551,11 +610,15 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
         else:
             product_name = " ".join(desc_lines[:2]).title() if len(desc_lines) >= 2 else brand
 
+        # Strip trademark symbols from product name
+        product_name = re.sub(r"[®™©]", "", product_name).strip()
+
         # If product name looks garbled (contains ! or is very short), reconstruct from components
         if "!" in product_name or len(product_name) < len(brand) + 5:
             pn_parts = [brand]
             _pn_joined = " ".join(pn_parts).lower()
             for kw in ["Seasoning", "Powder", "Soap", "Lotion", "Cream",
+                       "Tonic", "Syrup",
                        "Drink", "Juice", "Tea", "Coffee", "Chocolate"]:
                 if re.search(rf"\b{kw}\b", all_text, re.I) and kw.lower() not in _pn_joined:
                     pn_parts.append(kw)
@@ -566,7 +629,8 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
                     pn_parts.append("Sauce")
                     _pn_joined = " ".join(pn_parts).lower()
             for fw in ["Ginger", "Garlic", "Vanilla", "Strawberry",
-                       "Orange", "Lemon", "Mint", "Spicy", "Original", "Flavor", "Flavour"]:
+                       "Orange", "Lemon", "Mint", "Spicy", "Original", "Flavor", "Flavour",
+                       "Lung", "Cold", "Cough"]:
                 if re.search(rf"\b{fw}\b", all_text, re.I) and fw.lower() not in _pn_joined:
                     pn_parts.append(fw)
             if len(pn_parts) > 1:
@@ -593,6 +657,9 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
                 break
         # Extra segment hints from text
         seg_hints = {
+            "tonic": "Cough & Cold", "syrup": "Cough & Cold",
+            "tablet": "Tablets & Capsules", "capsule": "Tablets & Capsules",
+            "medicine": "General Medicine", "vitamin": "Dietary Supplements",
             "seasoning": "Seasonings & Spices", "spice": "Seasonings & Spices",
             "powder": "Seasonings & Spices", "juice": "Juice Drinks",
             "soap": "Bar Soap", "lotion": "Body Lotion", "cream": "Skin Care",
