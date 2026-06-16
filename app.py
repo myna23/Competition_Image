@@ -687,6 +687,30 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
                 seg_type = seg
                 break
 
+        # ── Healthcare brand override ────────────────────────────────────────
+        # For pharma/healthcare, the brand is the COMPANY name (Aspen, Beta Healthcare),
+        # not the large product-title text (Good Morning, NightCure, etc.).
+        # Detect company names by their suffix keywords.
+        _co_sfx = (r"(?:Pharmacare|Pharmaceuticals?|Healthcare|"
+                   r"Laborator(?:y|ies)|Sciences?|Biotech|Pharma)")
+        co_m = re.search(rf"\b([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+)?)\s+{_co_sfx}\b",
+                         all_text, re.I)
+        if co_m:
+            co_full = co_m.group(0).strip().title()
+            if manufacturer == "N/A":
+                manufacturer = co_full
+            if cat_type == "Healthcare":
+                brand = co_m.group(1).split()[0].title()
+
+        # General company suffix fallback for manufacturer (Ltd, Limited, Group, Inc …)
+        if manufacturer == "N/A":
+            co_gen = re.search(
+                r"\b([A-Z][A-Za-z]{2,}(?:\s+[A-Z][A-Za-z]{2,}){0,3})\s+"
+                r"(?:Ltd\.?|Limited|Inc\.?|PLC|Group|Industries?|Company|Corp(?:oration)?)\b",
+                all_text, re.I)
+            if co_gen:
+                manufacturer = co_gen.group(0).strip().title()
+
         result = {
             "barcode":              {"value": barcode,       "confidence": barcode_conf},
             "category_type":        {"value": cat_type,      "confidence": cat_conf},
