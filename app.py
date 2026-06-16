@@ -521,6 +521,10 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             "USING", "SPOON", "LIQUID", "SAUCE", "DISH", "AMOUNT", "ACTUAL",
             "CONTENTS", "WARNING", "CAUTION", "NOTE", "EMAIL", "PHONE",
             "WEIGHT", "NETT", "TOTAL", "EACH", "SIZE", "FOOD", "PACK",
+            # Medical/body terms — descriptors, not brand names
+            "LUNG", "CHEST", "COLD", "COUGH", "FEVER", "PAIN", "BODY",
+            # Product-type words — should never be mistaken for a brand
+            "TONIC", "SYRUP", "TABLET", "CAPSULE",
         }
 
         _prod_kw = (r"(?:seasoning|powder|sauce|soap|lotion|shampoo|juice|biscuit|"
@@ -593,6 +597,19 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
                 if prefix.upper() not in _non_brand and len(prefix) >= 3:
                     brand = prefix.title() + " " + brand
 
+        # Also extend brand forward if the next word is a valid brand component
+        # (e.g. brand="Good" → "Good Morning" when "Lung" was blocked as non-brand)
+        if brand and brand != "N/A":
+            fwd_m = re.search(
+                rf"\b{re.escape(brand)}\s+([A-Z][A-Za-z']+)\b",
+                logo_text + " " + ocr_text, re.I)
+            if fwd_m:
+                suffix = fwd_m.group(1).strip()
+                if (suffix.upper() not in _non_brand
+                        and not re.fullmatch(_prod_kw, suffix, re.I)
+                        and len(suffix) >= 3):
+                    brand = brand + " " + suffix.title()
+
         # ── Product name: logo region first, then main OCR ───────────────────
         _junk_sw = ["ingredient", "direction", "storage", "imported", "marketed",
                     "batch", "expiry", "prod date", "tel:", "p.o", "email", "www",
@@ -618,7 +635,7 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             pn_parts = [brand]
             _pn_joined = " ".join(pn_parts).lower()
             for kw in ["Seasoning", "Powder", "Soap", "Lotion", "Cream",
-                       "Tonic", "Syrup",
+                       "Lung", "Cold", "Cough", "Tonic", "Syrup",
                        "Drink", "Juice", "Tea", "Coffee", "Chocolate"]:
                 if re.search(rf"\b{kw}\b", all_text, re.I) and kw.lower() not in _pn_joined:
                     pn_parts.append(kw)
@@ -629,8 +646,7 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
                     pn_parts.append("Sauce")
                     _pn_joined = " ".join(pn_parts).lower()
             for fw in ["Ginger", "Garlic", "Vanilla", "Strawberry",
-                       "Orange", "Lemon", "Mint", "Spicy", "Original", "Flavor", "Flavour",
-                       "Lung", "Cold", "Cough"]:
+                       "Orange", "Lemon", "Mint", "Spicy", "Original", "Flavor", "Flavour"]:
                 if re.search(rf"\b{fw}\b", all_text, re.I) and fw.lower() not in _pn_joined:
                     pn_parts.append(fw)
             if len(pn_parts) > 1:
