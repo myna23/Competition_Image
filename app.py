@@ -53,7 +53,7 @@ _COUNTRY_MAP: dict[str, str] = {
     "england": "United Kingdom", "gb": "United Kingdom",
     "usa": "United States", "u.s.a.": "United States", "u.s.": "United States",
     "america": "United States",
-    "prc": "China", "p.r.c.": "China", "pr china": "China",
+    "prc": "China", "p.r.c": "China", "p.r.c.": "China", "pr china": "China",
     "xiamen": "China", "guangzhou": "China", "shenzhen": "China", "beijing": "China",
     "uae": "United Arab Emirates", "u.a.e.": "United Arab Emirates",
     "eu": "European Union",
@@ -428,10 +428,12 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
         wt_m = re.search(r"(\d+\.?\d*)\s*(g|ml|kg|l|G|ML|KG|L)\b", all_text, re.I)
         weight = (wt_m.group(1) + wt_m.group(2).lower()) if wt_m else "N/A"
 
-        # Manufacturer — match multiple attribution phrases
+        # Manufacturer — match multiple attribution phrases including "DISTRIBUTED / MARKETED BY:"
         mfr_m = re.search(
-            r"(?:manufactured by|mfd by|mfr|marketed by|imported(?:\s*&\s*marketed)? by"
-            r"|distributed by|produced by)[:\s]+([A-Za-z][A-Za-z\s&,\.]{3,50}?)(?:\n|$|tel:|p\.o|email)",
+            r"(?:manufactured by|mfd\.? by|mfr\.?|marketed by"
+            r"|imported(?:\s*[&/]\s*marketed)? by"
+            r"|distributed(?:\s*/\s*marketed)? by|produced by)[:\s]+"
+            r"([A-Za-z'][A-Za-z\s&,\.']{3,50}?)(?:\n|$|tel:|p\.o|email|box\b)",
             all_text, re.I)
         manufacturer = re.sub(r"\s+", " ", mfr_m.group(1)).strip().title() if mfr_m else "N/A"
 
@@ -525,6 +527,11 @@ def _extract_ml(img: Image.Image) -> tuple[dict | None, str | None]:
             "LUNG", "CHEST", "COLD", "COUGH", "FEVER", "PAIN", "BODY",
             # Product-type words — should never be mistaken for a brand
             "TONIC", "SYRUP", "TABLET", "CAPSULE",
+            # Product descriptor words that appear before other product keywords
+            # e.g. "Seasoning Powder" → "Seasoning" must not become the brand
+            "SEASONING", "SPICE", "SPICES", "FLAVOUR", "FLAVOR", "EXTRACT",
+            "CONCENTRATE", "BLEND", "MIX", "MIXED", "NATURAL", "ORGANIC",
+            "INSTANT", "READY", "REFINED", "ENRICHED", "FORTIFIED",
         }
 
         _prod_kw = (r"(?:seasoning|powder|sauce|soap|lotion|shampoo|juice|biscuit|"
